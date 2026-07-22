@@ -1,5 +1,7 @@
 # SplatField
 
+![PIC](eigenmodes.png)
+
 ### A driven-dissipative wave medium built from a face model's own atoms — with its complete rulebook
 
 **PerceptionLab | Antti Luode | Helsinki**
