@@ -137,20 +137,81 @@ separate and a keyframe is a foreign object the field merely tolerates. That is 
 
 ---
 
-## 4. Files
+## 4. What is in this repo, and what each piece was built to figure out
 
-| file | what |
-| --- | --- |
-| `splat_field.py` | The joined machine: numpy field core (the certified update), torch only at the model boundary, live app (keys k/d/m/a/z/+/−/t/y), per-keyframe power-iteration i_crit, `--full_eig` eigenmode gallery + EG2, drive-cut decay recorder + `--score_decay` RF1 scorer, `--selftest` (3/3 [V], no model or camera needed). |
-| `gabor_loop.py` | The autonomous half alone, torch, spectrum readout in the header. |
-| `gabor_loop_verify.py` | The numpy twin that certified the loop laws, 5/5 registered. |
-
-Model bridge assumes `splat_trainer3v2.SplatVAE` importable next to the script (the
-checkpoint stores `image_size`, `num_packets`, `sd`).
+| file | what it is | the question it was built to answer |
+| --- | --- | --- |
+| `gabor_loop_verify.py` | numpy twin of the closed loop, **executed** with predictions P1–P5 registered before the runs | *Is a closed Gabor field predictable from its spectrum before it runs?* Answer: 5/5 [V], plus the no-rotation theorem falling out of the Jacobian's symmetry. |
+| `gabor_loop.py` | PyTorch version of the same loop, spectrum readout in the header, `--twist` / `--gate` / `--dc_check` | *Does the method transfer to GPU and a basis it never saw?* Yes — torch i_crit 0.0433 vs numpy 0.0363 are different seeded bases, and each spectrum predicted its own loop. Also carries the one open problem: the saturated limit-cycle frequency under twist (three one-signed misses, documented in the header). |
+| `gabor_loop_log.csv` | the executed active-regime run, 1200 steps of `t, motion_energy, omega_w, max_abs_z` | The instrument data. Whoever attacks the open frequency problem starts here. |
+| `splat_field.py` | the joined machine — numpy field core (the certified update), torch only at the model boundary, live app | *What does the field do when its basis is trained and its drive is a camera?* Produced the two-worlds observation of §2. **Note:** the repo currently carries v1; v2 adds the EG2 eigenface comparison and the RF1 drive-cut decay recorder/scorer described in §2 — replace with v2 when merging. |
+| `tiny_avatar3.py` | the TINY AVATAR studio (Dataset Prep / Training / Avatar Driver tabs) and, for this repo's purposes, the `FaceFramer` | *Can the whole pipeline live in one app?* Here it plays a supporting role: `splat_field.py` imports its FaceFramer so the live crop matches the training crop (the framing mismatch is a measured artifact source). Needs PyQt6 only if actually imported; splat_field degrades to a Haar/center-crop fallback with a warning otherwise. |
+| `model2.pt` | the 96 px / 256-packet CelebA checkpoint (`sd`, `image_size`, `num_packets`), 23 MB, shipped | So every experiment in this repo reproduces on a fresh clone. This is the checkpoint all the trained-basis numbers were measured on. |
+| `eigenmodes.png` | the top-8 loop eigenmodes of a trained keyframe basis, rendered | The "face-like things" the field decays into, made visible. EG1's failed metric number (median 0.95) is attached to this image in the ledger; EG2 is the sharp question it raises. |
+| `splat_trainer3v2.py` | **not in this repo — fetch from [TinyAvatar](https://github.com/anttiluode/TinyAvatar)** and place next to `splat_field.py` | The model bridge imports it to instantiate `SplatVAE` and load the checkpoint. Without it, only `--selftest` and `--mock` run. |
 
 ---
 
-## 5. Honest revisions (chronological, kept forever)
+## 5. How to run the system
+
+**Install** (Python 3.10+):
+
+```
+pip install numpy opencv-contrib-python torch
+pip install PyQt6            # optional — only for tiny_avatar3 / FaceFramer
+```
+
+Copy `splat_trainer3v2.py` from the TinyAvatar repo into this folder (see table above).
+`opencv-contrib-python` matters on Windows Store Python: the plain wheel there ships
+without the Haar data file and face framing silently degrades to center-crop.
+
+**Run order** — each step certifies the ground the next one stands on:
+
+```
+# 1. Field core, no model, no camera. Registered gates T1–T3, expect 3/3 [V].
+python splat_field.py --selftest
+
+# 2. Re-run the loop certification (P1–P5, numpy, ~a minute on CPU).
+python gabor_loop_verify.py
+
+# 3. The autonomous loop on GPU; add --twist 2.2 to see created rotation.
+python gabor_loop.py
+python gabor_loop.py --twist 2.2
+
+# 4. Trained basis, offline: theorem carry-over (F3), eigenmode gallery,
+#    EG1 (expect [K], the weak metric) and EG2 (the open question).
+python splat_field.py --model model2.pt --full_eig
+
+# 5. Live.
+python splat_field.py --model model2.pt
+```
+
+**Live keys:** `k` new keyframe (re-freezes the basis from your face, re-estimates
+i_crit) · `d` drive cut (the F1 persistence measurement; toggling it OFF saves
+`decay_c.npz`) · `m` FIELD / DIRECT A/B (the F4 bloom bet, scored from
+`field_log.csv`) · `a`/`z` α up/down · `+`/`-` inject as a fraction of i_crit ·
+`t`/`y` twist (leaves the certified regime; treat as demo) · `space` pause · `q` quit.
+
+**Knobs:** `--leak` sets responsiveness (α=1 rise time is −1/ln leak steps);
+`--frac` sets inject as a fraction of the basis's own critical value — below 1 the
+field is a memory with decay 2·ln ρ per step, above 1 it holds a pattern; `--alpha`
+sets evidence vs prior.
+
+**The F1/RF1 procedure**, concretely: run live at `--frac 0.9`, let the field settle
+on your face, press `d`, sit still for ~500 steps watching the face decay into the
+eigenmode ghosts, press `d` again. Then:
+
+```
+python splat_field.py --score_decay decay_c.npz
+```
+
+which scores RF1 (does detail die first, in the registered sense) and prints the
+sigma confound. F1 itself is the decay-rate-vs-2·ln ρ comparison from `field_log.csv`
+over the same window.
+
+---
+
+## 6. Honest revisions (chronological, kept forever)
 
 1. **F2 pole**: first registered as ρ; selftest measured 19 steps against a predicted
    199 and the formula was wrong, not the field — at α=1 the self-term is gone and the
@@ -163,10 +224,13 @@ checkpoint stores `image_size`, `num_packets`, `sd`).
 4. **Windows Store Python** ships cv2 without the Haar data file → cascade load now
    guarded; falls back to center-crop **with a printed warning**, because center-crop
    reintroduces the train/live framing mismatch that the FaceFramer exists to fix.
+5. **Repo v1/v2 drift**: the first push carried splat_field v1 (pre-EG2, pre-RF1).
+   The numbers in §2 that depend on those instruments are *registered, unmeasured*
+   until v2 lands and runs; nothing in the ledger claims otherwise.
 
 ---
 
-## 6. Provenance and boundaries
+## 7. Provenance and boundaries
 
 The loop laws were certified in executed numpy with thresholds registered before the
 runs; the torch version reproduced them on an independently seeded basis (different
