@@ -46,6 +46,11 @@ from field_log.csv; [V]/[K] only after you run it):
     (First registration wrote -1/ln(rho); the selftest killed it in one
     run — rho governs the alpha->0 decay (F1), leak governs the alpha=1
     rise. Honest revision, made before any live run.)
+    Further revisions after the first live run: EG1 metric demoted (see
+    EG2); ndarray.ptp -> np.ptp (numpy 2.x removed the method); Haar
+    cascade path guarded (Windows Store Python ships cv2 without the
+    data file — falls back to center-crop WITH a printed warning, since
+    center-crop reintroduces the train/live framing mismatch).
  F3 THEOREM CARRY-OVER on the trained basis, twist=0 Jacobian still has
     max|Im mu| ~ 0 (adjoint symmetry is basis-independent — this is a
     check, not a bet; a violation means a wiring bug, not physics).
@@ -56,6 +61,21 @@ from field_log.csv; [V]/[K] only after you run it):
     FIELD mode at equal fit error. This is the practical payoff bet:
     the field as a temporal regularizer. Genuinely open — register
     before running.
+
+ RF1 DETAIL-DIES-FIRST during autonomous decay (drive cut), per-packet
+    amplitude decay rate correlates with spatial frequency, r >= +0.5
+    (mechanism [~] behind "the splats go missing": high-f packets sit in
+    low-eigenrank, weakly coupled Gram positions and damp fastest; gist
+    persists in the collective low-f top modes). Recorded automatically
+    while drive is cut; scored offline with --score_decay decay_c.npz.
+ EG2 EIGENMODES = EIGENFACES (replaces EG1's metric, which returned [K]
+    with median ratio ~0.95 on the CelebA keyframe — diagnosed weak, not
+    wrong: CelebA faces FILL the frame, so an in/out box ratio has no
+    contrast to measure even when the modes are visibly head-shaped).
+    EG2 asks the sharp version: cosine-match top loop eigenmodes against
+    PCA eigenfaces of the medium's own prior samples, vs a scrambled
+    null. [V] = the data world and the Gram world agree on face-modes.
+    [K] = two worlds. Either is a finding.
 
  OPEN, carried from gabor_loop: saturated limit-cycle frequency under
  twist (three one-signed misses). Untouched here; twist defaults 0.
@@ -314,6 +334,84 @@ def selftest():
           if all([ok1, ok2, ok3]) else "[K] read the failing line"))
     return all([ok1, ok2, ok3])
 
+def field_freq(f):  return np.asarray(f.pk["freq"]) if hasattr(f, "pk") else np.zeros(f.N)
+def field_sigma(f): return np.asarray(f.pk["sigma"]) if hasattr(f, "pk") else np.zeros(f.N)
+
+def score_decay(path):
+    """RF1 (registered): during autonomous decay, per-packet amplitude
+    decay RATE correlates with packet spatial frequency, Pearson r >= +0.5
+    (detail dies first; gist persists — the eigenrank/spatial-frequency
+    link stated as [~] in the README, scored here). Confound check: also
+    prints corr(rate, sigma)."""
+    d = np.load(path)
+    amp, freq, sig = d["amp"], d["freq"], d["sigma"]
+    T, N = amp.shape
+    if T < 60:
+        print(f"only {T} recorded steps; need >= 60 for a stable fit"); return
+    keep = amp[0] > np.median(amp[0]) * 0.1
+    rates = np.full(N, np.nan)
+    tt = np.arange(T)
+    for k in range(N):
+        if keep[k] and amp[-1, k] > 0:
+            rates[k] = np.polyfit(tt, np.log(amp[:, k] + 1e-30), 1)[0]
+    m = np.isfinite(rates)
+    r_f = float(np.corrcoef(-rates[m], freq[m])[0, 1])
+    r_s = float(np.corrcoef(-rates[m], sig[m])[0, 1])
+    ok = r_f >= 0.5
+    print(f"[{'V' if ok else 'K'}] RF1 corr(decay rate, freq) = {r_f:+.3f} "
+          f"(gate >= +0.50, {int(m.sum())} packets)   "
+          f"confound corr(rate, sigma) = {r_s:+.3f}")
+
+def eg2(field, encode, packets, S, M=48, top=4, seed=7):
+    """EG2 (registered, replaces EG1's weak metric): are the loop's top
+    eigenmodes the medium's own eigenfaces? Sample M latents from the VAE
+    prior, render each on ITS OWN basis, PCA the grayscale renders
+    (eigenfaces of the medium), and cosine-match the top loop eigenmodes
+    against the top-8 eigenfaces. Null: same statistic against eigenfaces
+    of pixel-scrambled renders (one shared permutation). GATE: mean over
+    top-4 modes of max|cos| >= 2x the scrambled null. If [V]: the data
+    world and the Gram world agree on what a face-mode is — eigenfaces
+    re-derived as DYNAMICAL normal modes. If [K]: two worlds, honestly."""
+    import torch
+    rng = np.random.default_rng(seed)
+    zdim = None
+    imgs = []
+    print(f"EG2: rendering {M} prior samples on their own bases...")
+    for i in range(M):
+        if zdim is None:
+            # probe latent dim from a dummy encode of gray
+            z0 = encode(np.full((S, S, 3), 0.5, np.float32))
+            zdim = int(z0.shape[-1])
+        z = torch.from_numpy(rng.standard_normal((1, zdim)).astype(
+            np.float32)).to(z0.device)
+        pk_s, c_s = packets(z)
+        Gs = basis_from_packets(pk_s, S)
+        imgs.append(sigmoid((c_s.T @ Gs).real).mean(0))
+        if (i + 1) % 12 == 0: print(f"  {i+1}/{M}")
+    X = np.array(imgs); Xc = X - X.mean(0)
+    _, _, Vt = np.linalg.svd(Xc, full_matrices=False)
+    EF = Vt[:8]                                          # eigenfaces
+    perm = rng.permutation(S * S)
+    Xs = Xc[:, perm]
+    _, _, Vs = np.linalg.svd(Xs, full_matrices=False)
+    EFs = Vs[:8]
+    K = full_jacobian(field)
+    w, V = np.linalg.eigh(0.5 * (K + K.T))
+    order = np.argsort(-w)[:top]
+    def stat(EFm):
+        vals = []
+        for j in order:
+            v = V[:field.N, j] + 1j * V[field.N:, j]
+            img = (v[:, None].T @ field.G).real.ravel()
+            img = img - img.mean(); img /= (np.linalg.norm(img) + 1e-12)
+            vals.append(max(abs(float(img @ e / (np.linalg.norm(e) + 1e-12)))
+                            for e in EFm))
+        return float(np.mean(vals))
+    s_real, s_null = stat(EF), stat(EFs)
+    ok = s_real >= 2 * s_null
+    print(f"[{'V' if ok else 'K'}] EG2 mode-vs-eigenface mean max|cos| "
+          f"{s_real:.3f} vs scrambled null {s_null:.3f} (gate >= 2x)")
+
 # --------------------------------------------------------------- live app
 def live(args):
     import cv2
@@ -335,6 +433,12 @@ def live(args):
     except Exception:
         casc = cv2.CascadeClassifier(cv2.data.haarcascades +
                                      "haarcascade_frontalface_default.xml")
+        if casc.empty():
+            print("WARN: Haar cascade not found -> face framing OFF, "
+                  "live crop falls back to CENTER-CROP. This reintroduces "
+                  "the train/live framing mismatch (Dataset Prep face-crops "
+                  "with 0.35 margin). Fix: put tiny_avatar3.py next to this "
+                  "file, or pip install opencv-contrib-python.")
         class _F:
             box = None
             def crop(self, frame):
@@ -364,6 +468,7 @@ def live(args):
     log = open(args.csv, "w"); log.write(
         "t,mode,alpha,frac,rho,motion,fit,floaters,drive_cut\n")
     t = 0; Fp = None
+    decay_rec, decay_freq = [], None
 
     def keyframe(img01):
         nonlocal field, Fp
@@ -374,6 +479,7 @@ def live(args):
             pk_l, c0 = packets(z)
         G = basis_from_packets(pk_l, S)
         field = Field(G, leak=args.leak, frac=frac, twist=args.twist)
+        field.pk = pk_l
         field.c = c0.copy()
         Fp = field.render()
         print(f"keyframe: i_crit {field.i_crit:.4f}  rho_pred {field.rho:.4f}"
@@ -383,9 +489,14 @@ def live(args):
             im_max, top_w, ratios = eigenmode_gallery(field, S,
                                                       facebox=fb)
             print(f"F3 max|Im mu| = {im_max:.2e} (theorem check)")
+            med = float(np.median(ratios)) if ratios else 0.0
             print("EG1 in/out face-box energy ratios:",
                   ["%.2f" % r for r in ratios],
-                  "-> registered pass: median > 2.0")
+                  f"-> median {med:.2f} vs gate 2.0: "
+                  f"[{'V' if med > 2.0 else 'K'}]  (see README: metric "
+                  f"diagnosed weak for frame-filling faces; EG2 replaces it)")
+            if not args.mock:
+                eg2(field, encode, packets, S)
 
     def floaters(img, ref):
         d = (np.abs(img - ref).mean(0).reshape(S, S) * 255).astype(np.uint8)
@@ -406,6 +517,8 @@ def live(args):
                 field.step(drive=None if drive_cut else drive,
                            alpha=0.0 if drive_cut else alpha)
                 out = field.render()
+                if drive_cut and len(decay_rec) < 800:
+                    decay_rec.append(np.abs(field.c).mean(1).copy())
             else:  # DIRECT: per-frame decode (the shipped app's behavior)
                 if args.mock:
                     out = field.render()
@@ -431,7 +544,15 @@ def live(args):
         k = cv2.waitKey(1) & 0xFF
         if k == ord('q'): break
         elif k == ord('k'): keyframe(img01)
-        elif k == ord('d'): drive_cut = not drive_cut
+        elif k == ord('d'):
+            drive_cut = not drive_cut
+            if drive_cut:
+                decay_rec.clear(); decay_freq = None
+            elif decay_rec:
+                np.savez("decay_c.npz", amp=np.array(decay_rec),
+                         freq=field_freq(field), sigma=field_sigma(field))
+                print(f"decay_c.npz saved ({len(decay_rec)} steps) — score "
+                      f"with --score_decay decay_c.npz  (RF1)")
         elif k == ord('m'): mode_field = not mode_field
         elif k == ord('a'): alpha = min(alpha + 0.05, 1.0)
         elif k == ord('z'): alpha = max(alpha - 0.05, 0.0)
@@ -463,7 +584,11 @@ if __name__ == "__main__":
     ap.add_argument("--twist", type=float, default=0.0)
     ap.add_argument("--full_eig", action="store_true")
     ap.add_argument("--csv", default="field_log.csv")
+    ap.add_argument("--score_decay", default=None,
+                    help="score RF1 from a saved decay_c.npz and exit")
     args = ap.parse_args()
+    if args.score_decay:
+        score_decay(args.score_decay); sys.exit(0)
     if args.selftest:
         sys.exit(0 if selftest() else 1)
     live(args)
